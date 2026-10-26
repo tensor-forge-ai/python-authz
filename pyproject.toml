@@ -1,6 +1,6 @@
 [project]
 name = "python-authz"
-version = "0.8.0"
+version = "0.8.1"
 description = "A framework-agnostic ReBAC/RBAC/ABAC authorization engine built on one Zanzibar-style relationship graph"
 readme = "README.md"
 license = "MIT"

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.1
+
+### Fixed
+
+- `PostgresStorage.current_token()` reads the change sequence with `pg_sequence_last_value()`, which needs only `USAGE` on the sequence. 0.8.0 selected from the sequence directly, which needs `SELECT`, so a role holding exactly the privileges that `docs/security.md` (A16) documents failed every write and every delete with `permission denied for sequence`. The least-privilege test now grants only those privileges.
+
+Upgrade from 0.8.0 with no other changes. A deployment that granted `SELECT` on the sequence as a workaround can revoke it.
+
 ## 0.8.0
 
 A security release. Each change below refers to a finding in [`docs/security.md`](docs/security.md), which explains the mechanism and the attack it closes. Several changes alter behaviour that 0.7.0 users may depend on; read the Upgrade Notes before upgrading.

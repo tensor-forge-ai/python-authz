@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-Security fixes are released for the latest minor version only. Version 0.8.0 fixes the findings recorded in [`docs/security.md`](docs/security.md), and earlier versions will not receive backports.
+Security fixes are released for the latest minor version only. Version 0.8.0 fixed the findings recorded in [`docs/security.md`](docs/security.md), and earlier versions will not receive backports. Use 0.8.1 or later with PostgreSQL: it fixes a privilege error of 0.8.0 described in `CHANGELOG.md`.
 
 | Version | Supported |
 |---|---|
