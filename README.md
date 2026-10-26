@@ -26,7 +26,7 @@ kept in agreement with each other.
 
 ## Status
 
-Release, version 0.8.1. Version 0.8.0 was a security release; [`docs/security.md`](docs/security.md) analyses the library end to end and records what changed; [`CHANGELOG.md`](CHANGELOG.md) lists the upgrade notes. The library provides:
+Release, version 0.8.1. Version 0.8.0 was a security release: [`docs/security.md`](docs/security.md) analyses the library end to end and records what changed, and [`CHANGELOG.md`](CHANGELOG.md) lists the upgrade notes. The library provides:
 
 - **Unified ReBAC + RBAC + ABAC**: Zanzibar-style relationship graphs with conditions evaluated against stored policy and request context. Stored context takes precedence.
 - **Three-Valued Conditions**: a condition may return `None` when its context is missing or invalid; rewrite rules combine `True`, `False`, and `None` with Kleene logic, and a check allows only on `True`, so missing context never grants access, even under `Exclusion`.
