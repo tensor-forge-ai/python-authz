@@ -18,7 +18,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        # Every supported CPython, plus the free-threaded builds ("t") from 3.14 on.
+        python-version: ["3.11", "3.12", "3.13", "3.14", "3.14t", "3.15", "3.15t"]
     services:
       postgres:
         image: postgres:16
@@ -40,4 +41,13 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - run: uv sync --all-extras --frozen
-      - run: uv run pytest -q
+      - name: Report the interpreter
+        run: uv run python -VV
+      # A dependency without free-threading support turns the GIL back on at import; fail if so.
+      - name: Check that the GIL stays off
+        if: endsWith(matrix.python-version, 't')
+        run: >-
+          uv run python -c "import sys, authz, aiosqlite, asyncpg, fastapi;
+          from authz import PostgresStorage;
+          sys.exit(1 if sys._is_gil_enabled() else 0)"
+      - run: uv run pytest -q -W error::DeprecationWarning

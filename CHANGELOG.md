@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Python 3.14 and 3.15, and their free-threaded builds, are supported and tested. No code change was needed: the package has no version-specific dependency, and `requires-python` was already `>=3.11` with no upper bound. The suite passes on CPython 3.11 to 3.13, 3.14.6, and 3.15.0b4, with the free-threaded 3.14t and 3.15t builds keeping the GIL off after importing every dependency, and with deprecation warnings treated as errors.
+- The test workflow covers all of these versions, fails a free-threaded run whose GIL is re-enabled by a dependency, and fails on any deprecation warning.
+
 ## 0.8.1
 
 ### Fixed
