@@ -196,14 +196,19 @@ async def test_least_privilege_role_without_ddl_rights_can_connect(postgres_dsn)
     await _admin(postgres_dsn, f"CREATE ROLE {role} LOGIN PASSWORD 'pw'")
     try:
         await _admin(postgres_dsn, f"GRANT SELECT, INSERT, UPDATE, DELETE ON {table} TO {role}")
-        await _admin(postgres_dsn, f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {role}")
+        # Exactly the privileges docs/security.md (A16) documents: USAGE, not SELECT.
+        await _admin(postgres_dsn, f"GRANT USAGE ON SEQUENCE {table}_change_id_seq TO {role}")
         parts = urlsplit(postgres_dsn)
         netloc = f"{role}:pw@{parts.hostname}" + (f":{parts.port}" if parts.port else "")
         dsn = urlunsplit(parts._replace(netloc=netloc))
         async with PostgresStorage(dsn, table=table, create_schema=False) as s:
             t = RelationTuple("document", "doc42", "owner", "user:alice")
-            await s.write_tuples([t])
-            assert await s.delete_tuples([t])
+            written = await s.write_tuples([t])
+            assert int(written) > 0
+            assert await s.read_tuples("document", object_id="doc42") == [t]
+            deleted = await s.delete_tuples([t])
+            assert int(deleted) > int(written)
+            await s.wait_for_token(deleted)
     finally:
         await _admin(postgres_dsn, f"DROP OWNED BY {role}")
         await _admin(postgres_dsn, f"DROP ROLE {role}")

@@ -205,13 +205,11 @@ class PostgresStorage:
     async def current_token(self) -> Token:
         conn, must_release = await self._connection()
         try:
-            # last_value alone is misleading: Postgres pre-seeds a freshly
-            # created (or RESTART IDENTITY-reset) sequence's last_value to
-            # its start value even before anything has actually consumed
-            # it. is_called distinguishes "really advanced" from "just
-            # initialized" -- only count it once nextval() has actually run.
+            # pg_sequence_last_value is NULL until nextval() has run (a fresh
+            # or RESTART IDENTITY-reset sequence), and it needs only USAGE on
+            # the sequence, where SELECT FROM the sequence needs SELECT.
             value = await conn.fetchval(
-                f"SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM {self._sequence}"
+                "SELECT COALESCE(pg_sequence_last_value($1::regclass), 0)", self._sequence
             )
             return str(value)
         finally:
