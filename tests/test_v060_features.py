@@ -69,9 +69,8 @@ async def test_runtime_context_passed_to_condition(sqlite_client):
     )
 
 
-async def test_runtime_context_overrides_static_tuple_context(sqlite_client):
+async def test_stored_tuple_context_wins_over_request_context(sqlite_client):
     sqlite_client.register_schema(Namespace("claim", {"review": Direct()}))
-    # Static tuple context sets max_amount to 1000
     await sqlite_client.write(
         [
             RelationTuple(
@@ -84,8 +83,7 @@ async def test_runtime_context_overrides_static_tuple_context(sqlite_client):
         ]
     )
 
-    # Amount is 2000. With static max_amount=1000, it would fail.
-    # But runtime context overrides max_amount to 5000 -> passes!
+    # The request cannot raise the limit the tuple was written with.
     assert (
         await sqlite_client.check(
             "user:bob",
@@ -93,8 +91,44 @@ async def test_runtime_context_overrides_static_tuple_context(sqlite_client):
             "claim:102",
             context={"amount": 2000, "max_amount": 5000},
         )
+        is False
+    )
+    assert (
+        await sqlite_client.check(
+            "user:bob",
+            "review",
+            "claim:102",
+            context={"amount": 500, "max_amount": 5000},
+        )
         is True
     )
+
+
+async def test_request_precedence_lets_request_context_override_stored():
+    storage = SqliteStorage(":memory:")
+    await storage.connect()
+    client = Client(
+        storage=storage,
+        condition_evaluator=PythonCallableEvaluator.with_builtins(),
+        context_precedence="request",
+    )
+    client.register_schema(Namespace("claim", {"review": Direct()}))
+    await client.write(
+        [
+            RelationTuple(
+                "claim", "102", "review", "user:bob",
+                condition=Condition("max_amount", {"max_amount": 1000}),
+            )
+        ]
+    )
+    assert (
+        await client.check(
+            "user:bob", "review", "claim:102",
+            context={"amount": 2000, "max_amount": 5000},
+        )
+        is True
+    )
+    await storage.close()
 
 
 async def test_runtime_context_supplements_static_context(sqlite_client):
@@ -518,7 +552,7 @@ def test_builtin_predicates():
         )
         is False
     )
-    assert jur_fn(subject="u", resource="r") is True
+    assert jur_fn(subject="u", resource="r") is None
 
     # not_same_subject
     nss_fn = builtins["not_same_subject"]
@@ -632,20 +666,22 @@ def test_fastapi_resolve_resource_from_query_and_headers(sqlite_client):
                 "report:{rep_id}",
                 get_client=get_client,
                 get_subject=get_subject,
+                resource_sources=("query",),
             )
         ),
     ):
         return {"loaded": True}
 
-    # Resource template uses {x_report_id} which comes from header
+    # Resource template uses {x_report_id} which comes from the x-report-id header
     @app.get("/report/by-header")
     async def report_header(
         _: None = Depends(
             requires(
                 "read",
-                "report:{x-report-id}",
+                "report:{x_report_id}",
                 get_client=get_client,
                 get_subject=get_subject,
+                resource_sources=("header",),
             )
         ),
     ):

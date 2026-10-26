@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING, Any
+
 from authz.conditions import (
     ConditionEvaluator,
     PythonCallableEvaluator,
@@ -10,6 +12,7 @@ from authz.errors import (
     ConditionNotFound,
     CycleDetected,
     DepthLimitExceeded,
+    EvaluationBudgetExceeded,
     NamespaceNotFound,
     RelationNotFound,
     SchemaCycleDetected,
@@ -27,9 +30,11 @@ from authz.schema import (
     build_role_hierarchy,
 )
 from authz.storage.base import Storage, Token
-from authz.storage.postgres import PostgresStorage
 from authz.storage.sqlite import SqliteStorage
 from authz.tuples import Condition, ObjectRef, RelationTuple, SubjectRef
+
+if TYPE_CHECKING:
+    from authz.storage.postgres import PostgresStorage
 
 __all__ = [
     "AuthError",
@@ -42,6 +47,7 @@ __all__ = [
     "CycleDetected",
     "DepthLimitExceeded",
     "Direct",
+    "EvaluationBudgetExceeded",
     "EvaluationDecision",
     "Exclusion",
     "From",
@@ -49,7 +55,6 @@ __all__ = [
     "Namespace",
     "NamespaceNotFound",
     "ObjectRef",
-    "PostgresStorage",
     "PythonCallableEvaluator",
     "RelationNotFound",
     "RelationTuple",
@@ -68,5 +73,14 @@ __all__ = [
 ]
 
 
-def main() -> None:
-    print("Hello from authz!")
+def __getattr__(name: str) -> Any:
+    if name == "PostgresStorage":
+        try:
+            from authz.storage.postgres import PostgresStorage
+        except ImportError as exc:
+            raise ImportError(
+                "PostgresStorage requires asyncpg; install it with "
+                "'pip install python-authz[postgres]'"
+            ) from exc
+        return PostgresStorage
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

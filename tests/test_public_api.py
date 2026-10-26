@@ -27,6 +27,7 @@ def test_public_api_exports_expected_names():
         "WouldCreateCycle",
         "CycleDetected",
         "DepthLimitExceeded",
+        "EvaluationBudgetExceeded",
         "CheckItem",
         "EvaluationDecision",
         "builtin_conditions",
@@ -35,3 +36,7 @@ def test_public_api_exports_expected_names():
     }
     for name in expected:
         assert hasattr(authz, name), f"missing export: {name}"
+
+
+def test_main_stub_is_gone():
+    assert not hasattr(authz, "main")

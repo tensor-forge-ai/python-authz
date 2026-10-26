@@ -40,10 +40,44 @@ async def test_evaluate_calls_async_callable():
     assert result is True
 
 
-async def test_evaluate_coerces_truthy_result_to_bool():
+@pytest.mark.parametrize("value", [[1, 2, 3], 1, "yes", object()])
+async def test_evaluate_rejects_truthy_non_bool_result(value):
     evaluator = PythonCallableEvaluator()
-    evaluator.register("returns_list", lambda **_: [1, 2, 3])
-    assert await evaluator.evaluate("returns_list", "user:alice", "document:doc42", {}) is True
+    evaluator.register("returns_value", lambda **_: value)
+    with pytest.raises(TypeError, match="returns_value"):
+        await evaluator.evaluate("returns_value", "user:alice", "document:doc42", {})
+
+
+@pytest.mark.parametrize("value", [True, False, None])
+async def test_evaluate_passes_through_true_false_and_none(value):
+    evaluator = PythonCallableEvaluator()
+    evaluator.register("returns_value", lambda **_: value)
+    result = await evaluator.evaluate("returns_value", "user:alice", "document:doc42", {})
+    assert result is value
+
+
+async def test_evaluate_passes_through_async_none():
+    async def unknown(**_):
+        return None
+
+    evaluator = PythonCallableEvaluator()
+    evaluator.register("unknown", unknown)
+    assert await evaluator.evaluate("unknown", "user:alice", "document:doc42", {}) is None
+
+
+@pytest.mark.parametrize("key", ["subject", "resource"])
+async def test_evaluate_rejects_reserved_context_keys(key):
+    evaluator = PythonCallableEvaluator()
+    evaluator.register("always_true", lambda **_: True)
+    with pytest.raises(ValueError, match=key):
+        await evaluator.evaluate("always_true", "user:alice", "document:doc42", {key: "x"})
+
+
+async def test_evaluate_rejects_non_string_context_keys():
+    evaluator = PythonCallableEvaluator()
+    evaluator.register("always_true", lambda **_: True)
+    with pytest.raises(ValueError, match="strings"):
+        await evaluator.evaluate("always_true", "user:alice", "document:doc42", {1: "x"})
 
 
 async def test_evaluate_raises_condition_not_found_for_unregistered_name():

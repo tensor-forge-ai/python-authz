@@ -26,17 +26,18 @@ kept in agreement with each other.
 
 ## Status
 
-Release, version 0.7.0:
+Release, version 0.8.0, a security release. [`docs/security.md`](docs/security.md) analyses the library end to end and records what changed; [`CHANGELOG.md`](CHANGELOG.md) lists the upgrade notes. The library provides:
 
-- **Singleton & Cardinality Constraints**: Enforce subject limits on relations (e.g. at most 1 `org_admin`) via `singleton_relations` and `max_subjects` on `Namespace`, raising `CardinalityViolationError` on violations while maintaining idempotent rewrites.
-- **Declarative Role Hierarchies & Strict Upward Overrides**: `build_role_hierarchy(roles_high_to_low, extra_relations=...)` creates multi-tier role hierarchies with transitive downward inheritance and strict upward override relations (`override_<role>`).
-- **Unified ReBAC + RBAC + ABAC**: Zanzibar-style relationship graphs with dynamic runtime ABAC context.
-- **Audit Trail & Policy Explanation**: `Client.explain()` returning `EvaluationDecision` with traversed paths, matched tuples, condition evaluations, and human-readable reasons.
-- **Batch Evaluation & Caching**: `Client.check_batch()` evaluating sequences of `CheckItem`s with per-batch ephemeral read caching.
-- **Introspection**: `Client.list_permissions()` and `Client.list_objects()` for resource and subject discovery.
-- **Declarative Built-in ABAC Predicates**: `builtin_conditions()` and `PythonCallableEvaluator.with_builtins()` (`max_amount`, `min_amount`, `equals_attr`, `in_set`, `jurisdiction_match`, `not_same_subject`).
-- **Enhanced FastAPI Integration**: `requires()` with `get_context`, path/query/header resource parameter resolution, and `explain_access()` storing decisions on `request.state.authz_decision`.
-- Async SQLite and PostgreSQL storage backends.
+- **Unified ReBAC + RBAC + ABAC**: Zanzibar-style relationship graphs with conditions evaluated against stored policy and request context. Stored context takes precedence.
+- **Three-Valued Conditions**: a condition may return `None` when its context is missing or invalid; rewrite rules combine `True`, `False`, and `None` with Kleene logic, and a check allows only on `True`, so missing context never grants access, even under `Exclusion`.
+- **Bounded Evaluation**: per-check memoization, `max_depth`, and an evaluation budget (`max_evaluations`) for `check()` and `expand()`.
+- **Singleton and Cardinality Constraints**: `singleton_relations` and `max_subjects` on `Namespace`, enforced under storage locks so concurrent writers cannot exceed them.
+- **Declarative Role Hierarchies**: `build_role_hierarchy(roles_high_to_low, extra_relations=...)` with transitive downward inheritance and `override_<role>` relations.
+- **Audit and Explanation**: `Client.explain()` returns an `EvaluationDecision` with the visited relations, matched tuples, condition results, and a reason.
+- **Batch Evaluation and Introspection**: `check_batch()`, `list_permissions()`, and `list_objects()`.
+- **Built-in Conditions**: `max_amount`, `min_amount`, `equals_attr`, `in_set`, `jurisdiction_match`, `not_same_subject`, all fail-closed.
+- **FastAPI Integration**: `requires()` and `explain_access()`, with resource placeholders resolved from path parameters unless `resource_sources` enables query parameters or headers.
+- **Storage**: async SQLite and PostgreSQL backends with configurable table names and an option to connect without DDL privileges.
 
 ## Roadmap
 
@@ -46,13 +47,13 @@ Release, version 0.7.0:
 - JSON-Logic and CEL `ConditionEvaluator` implementations, alongside the
   existing Python-callable one
 - Java, Kotlin, Rust, and C++ SDKs
-- making `asyncpg`/`duckdb` and `pyjwt`/`httpx2` optional too, the way
-  `fastapi` already is
 
 ## Install
 
 ```bash
-uv add python-authz
+uv add python-authz                # core, with SQLite storage
+uv add "python-authz[postgres]"    # adds PostgresStorage (asyncpg)
+uv add "python-authz[fastapi]"     # adds authz.integrations.fastapi
 ```
 
 ## Quickstart
@@ -105,7 +106,7 @@ deep versus something bypassed the guards.
 
 ## Role Hierarchies & Cardinality Constraints
 
-v0.7.0 adds first-class support for ordered role tiers with upward override relations and singleton limits:
+Version 0.7.0 added first-class support for ordered role tiers with upward override relations and singleton limits:
 
 ```python
 from authz import Namespace, build_role_hierarchy, RelationTuple, CardinalityViolationError
@@ -166,9 +167,15 @@ caller receives a 403 automatically. See
 example, including how `get_client`/`get_subject` compose with your app's
 own database and auth setup.
 
+## Security
+
+Read [`docs/security.md`](docs/security.md) for the threat model, the findings fixed in 0.8.0, and the responsibilities that stay with the application. Report vulnerabilities privately as described in [`SECURITY.md`](SECURITY.md).
+
 ## Development
 
 ```bash
-uv sync --extra fastapi
+uv sync --all-extras
 uv run pytest
 ```
+
+The PostgreSQL tests use the server at `AUTHZ_TEST_POSTGRES_DSN` (a superuser DSN; the tests create and drop their own database), or start one with testcontainers when Docker is available, and are skipped otherwise.

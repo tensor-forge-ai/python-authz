@@ -7,6 +7,11 @@ Token = str
 
 
 class Storage(Protocol):
+    # Optional: `async def lock(self, key: str) -> None`. Called inside transaction();
+    # must block until the caller holds an exclusive lock on `key` until the
+    # transaction ends. Client.write uses it, when present, to serialize
+    # cardinality checks and cycle guards across concurrent writers.
+
     async def write_tuples(self, tuples: Sequence[RelationTuple]) -> Token: ...
 
     async def delete_tuples(self, tuples: Sequence[RelationTuple]) -> Token: ...

@@ -1,6 +1,6 @@
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 from authz.conditions import ConditionEvaluator, ConditionFn
 from authz.errors import (
@@ -8,6 +8,7 @@ from authz.errors import (
     ConditionNotFound,
     CycleDetected,
     DepthLimitExceeded,
+    EvaluationBudgetExceeded,
     NamespaceNotFound,
     RelationNotFound,
     WouldCreateCycle,
@@ -22,10 +23,12 @@ from authz.schema import (
     TupleToUserset,
     Union,
     check_schema_cycles,
-    tupleset_relations,
+    tuple_to_usersets,
 )
 from authz.storage.base import Storage, Token
 from authz.tuples import ObjectRef, RelationTuple, SubjectRef
+
+ReadCache = dict[tuple[str, str | None, str | None, str | None], list[RelationTuple]]
 
 
 @dataclass(frozen=True)
@@ -44,8 +47,9 @@ class EvaluationDecision:
     resource: str
     matched_tuples: tuple[RelationTuple, ...] = ()
     visited_path: tuple[str, ...] = ()
-    condition_results: tuple[tuple[str, bool], ...] = ()
+    condition_results: tuple[tuple[str, bool | None], ...] = ()
     reason: str = ""
+    indeterminate: bool = False
 
 
 @dataclass(frozen=True)
@@ -56,13 +60,69 @@ class UsersetTree:
     children: tuple["UsersetTree", ...] = ()
 
 
+def _and(a: bool | None, b: bool | None) -> bool | None:
+    if a is False or b is False:
+        return False
+    return None if a is None or b is None else True
+
+
+def _not(value: bool | None) -> bool | None:
+    return None if value is None else not value
+
+
 class _TraceCollector:
     __slots__ = ("visited_path", "matched_tuples", "condition_results")
 
     def __init__(self) -> None:
         self.visited_path: list[str] = []
         self.matched_tuples: list[RelationTuple] = []
-        self.condition_results: list[tuple[str, bool]] = []
+        self.condition_results: list[tuple[str, bool | None]] = []
+
+
+class _Budget:
+    __slots__ = ("limit", "left")
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.left = limit
+
+    def spend(self) -> None:
+        if self.left <= 0:
+            raise EvaluationBudgetExceeded(self.limit)
+        self.left -= 1
+
+
+class _CheckState:
+    # Subject and context are fixed within one top-level check, so results
+    # keyed by (namespace, object_id, relation) can be memoized.
+    __slots__ = (
+        "subject", "subject_ref", "context", "read_cache", "memo", "budget", "collector",
+    )
+
+    def __init__(
+        self,
+        subject: str,
+        context: Mapping[str, Any] | None,
+        read_cache: ReadCache,
+        budget: _Budget,
+        collector: _TraceCollector | None,
+    ) -> None:
+        self.subject = subject
+        self.subject_ref = SubjectRef.parse(subject)
+        self.context = context or {}
+        self.read_cache = read_cache
+        self.memo: dict[tuple[str, str, str], bool | None] | None = (
+            {} if collector is None else None
+        )
+        self.budget = budget
+        self.collector = collector
+
+    def mark(self) -> int:
+        return len(self.collector.matched_tuples) if self.collector is not None else 0
+
+    def rewind(self, mark: int) -> None:
+        if self.collector is not None:
+            del self.collector.matched_tuples[mark:]
 
 
 class Client:
@@ -71,21 +131,35 @@ class Client:
         storage: Storage,
         condition_evaluator: ConditionEvaluator,
         max_depth: int = 25,
+        *,
+        context_precedence: Literal["stored", "request"] = "stored",
+        max_evaluations: int = 10_000,
     ):
+        if context_precedence not in ("stored", "request"):
+            raise ValueError(
+                f"context_precedence must be 'stored' or 'request', got {context_precedence!r}"
+            )
+        if max_evaluations < 1:
+            raise ValueError(f"max_evaluations must be at least 1, got {max_evaluations!r}")
         self._storage = storage
         self._conditions = condition_evaluator
         self._max_depth = max_depth
+        self._context_precedence = context_precedence
+        self._max_evaluations = max_evaluations
         self._namespaces: dict[str, Namespace] = {}
         self._traversal_relations: dict[str, set[str]] = {}
+        self._tupleset_rules: dict[str, dict[str, list[TupleToUserset]]] = {}
 
     def register_schema(self, *namespaces: Namespace) -> None:
         for ns in namespaces:
             check_schema_cycles(ns)
             self._namespaces[ns.name] = ns
-            traversal: set[str] = set()
+            rules: dict[str, list[TupleToUserset]] = {}
             for rule in ns.relations.values():
-                traversal |= tupleset_relations(rule)
-            self._traversal_relations[ns.name] = traversal
+                for ttu in tuple_to_usersets(rule):
+                    rules.setdefault(ttu.tupleset_relation, []).append(ttu)
+            self._tupleset_rules[ns.name] = rules
+            self._traversal_relations[ns.name] = set(rules)
 
     def register_condition(self, name: str, fn: ConditionFn) -> None:
         self._conditions.register(name, fn)
@@ -111,6 +185,17 @@ class Client:
         self._get_relation(t.namespace, t.relation)
         if t.condition is not None and not self._conditions.is_registered(t.condition.name):
             raise ConditionNotFound(t.condition.name)
+        subject = t.subject_ref
+        if subject.is_userset:
+            self._get_relation(subject.namespace, subject.relation)
+        rules = self._tupleset_rules[t.namespace].get(t.relation, ())
+        if rules and subject.is_userset:
+            raise ValueError(
+                f"{t.namespace}#{t.relation} is a tupleset relation; "
+                f"its subject must not be a userset, got {t.subject!r}"
+            )
+        for rule in rules:
+            self._get_relation(subject.namespace, rule.computed_relation)
 
     def _is_graph_edge(self, t: RelationTuple) -> bool:
         if t.relation in self._traversal_relations.get(t.namespace, set()):
@@ -148,6 +233,20 @@ class Client:
         for t in tuples:
             self._validate_tuple(t)
         async with self._storage.transaction():
+            limited = {
+                (t.namespace, t.object_id, t.relation)
+                for t in tuples
+                if self._namespaces[t.namespace].max_subjects_for(t.relation) is not None
+            }
+            lock = getattr(self._storage, "lock", None)
+            if lock is not None:
+                # Always cardinality keys (sorted) before the graph key, so
+                # concurrent writers cannot deadlock.
+                for namespace, object_id, relation in sorted(limited):
+                    await lock(f"authz:cardinality:{namespace}:{object_id}#{relation}")
+                if any(self._is_graph_edge(t) for t in tuples):
+                    await lock("authz:graph")
+
             target_subjects: dict[tuple[str, str, str], list[str]] = {}
             for t in tuples:
                 ns = self._namespaces[t.namespace]
@@ -202,24 +301,38 @@ class Client:
 
     async def _read_tuples(
         self,
+        state: _CheckState,
         namespace: str,
-        object_id: str | None = None,
-        relation: str | None = None,
-        subject: str | None = None,
-        *,
-        read_cache: dict[tuple[str, str | None, str | None, str | None], list[RelationTuple]] | None = None,
+        object_id: str,
+        relation: str,
     ) -> list[RelationTuple]:
-        if read_cache is not None:
-            key = (namespace, object_id, relation, subject)
-            if key in read_cache:
-                return read_cache[key]
-            result = await self._storage.read_tuples(
-                namespace, object_id=object_id, relation=relation, subject=subject
+        key = (namespace, object_id, relation, None)
+        if key not in state.read_cache:
+            state.read_cache[key] = await self._storage.read_tuples(
+                namespace, object_id=object_id, relation=relation
             )
-            read_cache[key] = result
-            return result
-        return await self._storage.read_tuples(
-            namespace, object_id=object_id, relation=relation, subject=subject
+        return state.read_cache[key]
+
+    async def _evaluate(
+        self,
+        subject: str,
+        permission: str,
+        resource: str,
+        context: Mapping[str, Any] | None,
+        read_cache: ReadCache | None,
+        collector: _TraceCollector | None,
+    ) -> bool | None:
+        target = ObjectRef.parse(resource)
+        self._get_relation(target.namespace, permission)
+        state = _CheckState(
+            subject,
+            context,
+            {} if read_cache is None else read_cache,
+            _Budget(self._max_evaluations),
+            collector,
+        )
+        return await self._check_relation(
+            state, target.namespace, target.object_id, permission, []
         )
 
     async def check(
@@ -230,21 +343,14 @@ class Client:
         *,
         at_least_as_fresh_as: Token | None = None,
         context: Mapping[str, Any] | None = None,
-        _read_cache: dict[tuple[str, str | None, str | None, str | None], list[RelationTuple]] | None = None,
+        _read_cache: ReadCache | None = None,
     ) -> bool:
         if at_least_as_fresh_as is not None:
             await self._storage.wait_for_token(at_least_as_fresh_as)
-        target = ObjectRef.parse(resource)
-        self._get_relation(target.namespace, permission)
-        return await self._check_relation(
-            subject,
-            target.namespace,
-            target.object_id,
-            permission,
-            [],
-            context=context,
-            read_cache=_read_cache,
+        result = await self._evaluate(
+            subject, permission, resource, context, _read_cache, None
         )
+        return result is True
 
     async def explain(
         self,
@@ -257,19 +363,13 @@ class Client:
     ) -> EvaluationDecision:
         if at_least_as_fresh_as is not None:
             await self._storage.wait_for_token(at_least_as_fresh_as)
-        target = ObjectRef.parse(resource)
-        self._get_relation(target.namespace, permission)
 
         collector = _TraceCollector()
-        allowed = await self._check_relation(
-            subject,
-            target.namespace,
-            target.object_id,
-            permission,
-            [],
-            context=context,
-            collector=collector,
+        result = await self._evaluate(
+            subject, permission, resource, context, None, collector
         )
+        allowed = result is True
+        indeterminate = result is None
 
         target_node = f"{resource}#{permission}"
         if allowed:
@@ -284,7 +384,13 @@ class Client:
             reason = f"Allowed via {' -> '.join(chain)}"
         else:
             matched = ()
-            reason = f"Denied: no matching relation or condition failed for {subject} on {target_node}"
+            if indeterminate:
+                reason = (
+                    "Denied: indeterminate, missing or invalid condition context "
+                    f"for {subject} on {target_node}"
+                )
+            else:
+                reason = f"Denied: no matching relation or condition failed for {subject} on {target_node}"
 
         return EvaluationDecision(
             allowed=allowed,
@@ -295,6 +401,7 @@ class Client:
             visited_path=tuple(collector.visited_path),
             condition_results=tuple(collector.condition_results),
             reason=reason,
+            indeterminate=indeterminate,
         )
 
     async def check_batch(
@@ -305,7 +412,7 @@ class Client:
     ) -> list[bool]:
         if at_least_as_fresh_as is not None:
             await self._storage.wait_for_token(at_least_as_fresh_as)
-        read_cache: dict[tuple[str, str | None, str | None, str | None], list[RelationTuple]] = {}
+        read_cache: ReadCache = {}
         results: list[bool] = []
         for item in checks:
             res = await self.check(
@@ -388,18 +495,16 @@ class Client:
 
     async def _check_relation(
         self,
-        subject: str,
+        state: _CheckState,
         namespace: str,
         object_id: str,
         relation: str,
         path: list[tuple[str, str, str]],
-        *,
-        context: Mapping[str, Any] | None = None,
-        collector: _TraceCollector | None = None,
-        read_cache: dict[tuple[str, str | None, str | None, str | None], list[RelationTuple]] | None = None,
-    ) -> bool:
+    ) -> bool | None:
+        state.budget.spend()
         node = (namespace, object_id, relation)
         node_str = f"{namespace}:{object_id}#{relation}"
+        collector = state.collector
         if collector is not None and node_str not in collector.visited_path:
             collector.visited_path.append(node_str)
 
@@ -407,214 +512,200 @@ class Client:
             trail = [f"{ns}:{oid}#{rel}" for ns, oid, rel in path]
             trail.append(node_str)
             raise CycleDetected(trail)
+        # Only completed nodes are memoized, so an in-progress node is never
+        # served from the memo and the cycle check above stays authoritative.
+        if state.memo is not None and node in state.memo:
+            return state.memo[node]
         if len(path) >= self._max_depth:
             raise DepthLimitExceeded(self._max_depth)
         rule = self._get_relation(namespace, relation)
-        return await self._eval_rule(
-            rule,
-            subject,
-            namespace,
-            object_id,
-            relation,
-            path + [node],
-            context=context,
-            collector=collector,
-            read_cache=read_cache,
+        result = await self._eval_rule(
+            state, rule, namespace, object_id, relation, path + [node]
         )
+        if state.memo is not None:
+            state.memo[node] = result
+        return result
 
     async def _eval_rule(
         self,
+        state: _CheckState,
         rule: RewriteRule,
-        subject: str,
         namespace: str,
         object_id: str,
         relation: str,
         path: list[tuple[str, str, str]],
-        *,
-        context: Mapping[str, Any] | None = None,
-        collector: _TraceCollector | None = None,
-        read_cache: dict[tuple[str, str | None, str | None, str | None], list[RelationTuple]] | None = None,
-    ) -> bool:
+    ) -> bool | None:
         if isinstance(rule, Direct):
-            return await self._eval_direct(
-                subject,
-                namespace,
-                object_id,
-                relation,
-                path,
-                context=context,
-                collector=collector,
-                read_cache=read_cache,
-            )
+            return await self._eval_direct(state, namespace, object_id, relation, path)
         if isinstance(rule, Union):
+            result: bool | None = False
             for child in rule.children:
-                mark = len(collector.matched_tuples) if collector is not None else 0
-                if await self._eval_rule(
-                    child,
-                    subject,
-                    namespace,
-                    object_id,
-                    relation,
-                    path,
-                    context=context,
-                    collector=collector,
-                    read_cache=read_cache,
-                ):
+                mark = state.mark()
+                value = await self._eval_rule(
+                    state, child, namespace, object_id, relation, path
+                )
+                if value is True:
                     return True
-                if collector is not None:
-                    del collector.matched_tuples[mark:]
-            return False
+                if value is None:
+                    result = None
+                state.rewind(mark)
+            return result
         if isinstance(rule, Intersection):
-            mark = len(collector.matched_tuples) if collector is not None else 0
+            result = True
+            mark = state.mark()
             for child in rule.children:
-                if not await self._eval_rule(
-                    child,
-                    subject,
-                    namespace,
-                    object_id,
-                    relation,
-                    path,
-                    context=context,
-                    collector=collector,
-                    read_cache=read_cache,
-                ):
-                    if collector is not None:
-                        del collector.matched_tuples[mark:]
+                value = await self._eval_rule(
+                    state, child, namespace, object_id, relation, path
+                )
+                if value is False:
+                    state.rewind(mark)
                     return False
-            return True
+                if value is None:
+                    result = None
+            if result is None:
+                state.rewind(mark)
+            return result
         if isinstance(rule, Exclusion):
-            mark = len(collector.matched_tuples) if collector is not None else 0
-            if not await self._eval_rule(
-                rule.base,
-                subject,
-                namespace,
-                object_id,
-                relation,
-                path,
-                context=context,
-                collector=collector,
-                read_cache=read_cache,
-            ):
-                if collector is not None:
-                    del collector.matched_tuples[mark:]
-                return False
-            sub_mark = len(collector.matched_tuples) if collector is not None else 0
-            sub_result = await self._eval_rule(
-                rule.subtract,
-                subject,
-                namespace,
-                object_id,
-                relation,
-                path,
-                context=context,
-                collector=collector,
-                read_cache=read_cache,
+            mark = state.mark()
+            base = await self._eval_rule(
+                state, rule.base, namespace, object_id, relation, path
             )
-            if collector is not None:
-                del collector.matched_tuples[sub_mark:]
-            if sub_result:
-                if collector is not None:
-                    del collector.matched_tuples[mark:]
+            if base is False:
+                state.rewind(mark)
                 return False
-            return True
+            sub_mark = state.mark()
+            subtract = await self._eval_rule(
+                state, rule.subtract, namespace, object_id, relation, path
+            )
+            state.rewind(sub_mark)
+            result = _and(base, _not(subtract))
+            if result is not True:
+                state.rewind(mark)
+            return result
         if isinstance(rule, From):
             return await self._check_relation(
-                subject,
-                namespace,
-                object_id,
-                rule.relation,
-                path,
-                context=context,
-                collector=collector,
-                read_cache=read_cache,
+                state, namespace, object_id, rule.relation, path
             )
         if isinstance(rule, TupleToUserset):
             parents = await self._read_tuples(
-                namespace,
-                object_id=object_id,
-                relation=rule.tupleset_relation,
-                read_cache=read_cache,
+                state, namespace, object_id, rule.tupleset_relation
             )
+            result = False
             for pt in parents:
                 pref = pt.subject_ref
-                mark = len(collector.matched_tuples) if collector is not None else 0
-                if await self._check_relation(
-                    subject,
-                    pref.namespace,
-                    pref.object_id,
-                    rule.computed_relation,
-                    path,
-                    context=context,
-                    collector=collector,
-                    read_cache=read_cache,
-                ):
-                    if collector is not None:
-                        collector.matched_tuples.append(pt)
+                holds = await self._condition_holds(state, pt, namespace, object_id)
+                if holds is False:
+                    continue
+                mark = state.mark()
+                if pref.is_userset:
+                    value = None  # not writable through Client; never traverse
+                else:
+                    value = await self._check_relation(
+                        state, pref.namespace, pref.object_id, rule.computed_relation, path
+                    )
+                value = _and(holds, value)
+                if value is True:
+                    if state.collector is not None:
+                        state.collector.matched_tuples.append(pt)
                     return True
-                if collector is not None:
-                    del collector.matched_tuples[mark:]
-            return False
+                if value is None:
+                    result = None
+                state.rewind(mark)
+            return result
         raise TypeError(f"unsupported rewrite rule: {rule!r}")
+
+    async def _condition_holds(
+        self, state: _CheckState, t: RelationTuple, namespace: str, object_id: str
+    ) -> bool | None:
+        if t.condition is None:
+            return True
+        request = state.context
+        if self._context_precedence == "stored":
+            merged = {**request, **t.condition.context}
+        else:
+            merged = {**t.condition.context, **request}
+        holds = await self._conditions.evaluate(
+            t.condition.name, state.subject, f"{namespace}:{object_id}", merged
+        )
+        if holds is not None and not isinstance(holds, bool):
+            raise TypeError(
+                f"condition {t.condition.name!r} returned {type(holds).__name__}; "
+                "evaluators must return True, False or None"
+            )
+        if state.collector is not None:
+            state.collector.condition_results.append((t.condition.name, holds))
+        return holds
 
     async def _eval_direct(
         self,
-        subject: str,
+        state: _CheckState,
         namespace: str,
         object_id: str,
         relation: str,
         path: list[tuple[str, str, str]],
-        *,
-        context: Mapping[str, Any] | None = None,
-        collector: _TraceCollector | None = None,
-        read_cache: dict[tuple[str, str | None, str | None, str | None], list[RelationTuple]] | None = None,
-    ) -> bool:
-        subject_ref = SubjectRef.parse(subject)
-        tuples = await self._read_tuples(
-            namespace, object_id=object_id, relation=relation, read_cache=read_cache
-        )
+    ) -> bool | None:
+        subject_ref = state.subject_ref
+        tuples = await self._read_tuples(state, namespace, object_id, relation)
+        result: bool | None = False
         for t in tuples:
-            if t.condition is not None:
-                merged_ctx = {**t.condition.context, **(context or {})}
-                holds = await self._conditions.evaluate(
-                    t.condition.name, subject, f"{namespace}:{object_id}", merged_ctx
-                )
-                if collector is not None:
-                    collector.condition_results.append((t.condition.name, holds))
-                if not holds:
-                    continue
             tref = t.subject_ref
             if not tref.is_userset:
-                if tref.namespace == subject_ref.namespace and tref.object_id == subject_ref.object_id:
-                    if collector is not None:
-                        collector.matched_tuples.append(t)
+                # Plain tuple subjects match plain request subjects only.
+                if tref != subject_ref:
+                    continue
+                holds = await self._condition_holds(state, t, namespace, object_id)
+                if holds is True:
+                    if state.collector is not None:
+                        state.collector.matched_tuples.append(t)
                     return True
+                if holds is None:
+                    result = None
+                continue
+            holds = await self._condition_holds(state, t, namespace, object_id)
+            if holds is False:
+                continue
+            mark = state.mark()
+            if tref == subject_ref:
+                value: bool | None = True
             else:
-                mark = len(collector.matched_tuples) if collector is not None else 0
-                if await self._check_relation(
-                    subject,
-                    tref.namespace,
-                    tref.object_id,
-                    tref.relation,
-                    path,
-                    context=context,
-                    collector=collector,
-                    read_cache=read_cache,
-                ):
-                    if collector is not None:
-                        collector.matched_tuples.append(t)
-                    return True
-                if collector is not None:
-                    del collector.matched_tuples[mark:]
-        return False
+                value = await self._check_relation(
+                    state, tref.namespace, tref.object_id, tref.relation, path
+                )
+            value = _and(holds, value)
+            if value is True:
+                if state.collector is not None:
+                    state.collector.matched_tuples.append(t)
+                return True
+            if value is None:
+                result = None
+            state.rewind(mark)
+        return result
 
     async def expand(self, permission: str, resource: str) -> "UsersetTree":
         target = ObjectRef.parse(resource)
         rule = self._get_relation(target.namespace, permission)
-        return await self._expand_rule(rule, target.namespace, target.object_id, permission)
+        return await self._expand_rule(
+            rule, target.namespace, target.object_id, permission, (), _Budget(self._max_evaluations)
+        )
 
     async def _expand_rule(
-        self, rule, namespace: str, object_id: str, relation: str
+        self,
+        rule,
+        namespace: str,
+        object_id: str,
+        relation: str,
+        path: tuple[tuple[str, str, str], ...],
+        budget: _Budget,
     ) -> "UsersetTree":
+        budget.spend()
+        node = (namespace, object_id, relation)
+        if node in path:
+            trail = [f"{ns}:{oid}#{rel}" for ns, oid, rel in path]
+            trail.append(f"{namespace}:{object_id}#{relation}")
+            raise CycleDetected(trail)
+        if len(path) >= self._max_depth:
+            raise DepthLimitExceeded(self._max_depth)
+        path = path + (node,)
         direct_subjects: list[str] = []
         children: list[UsersetTree] = []
 
@@ -636,6 +727,8 @@ class Client:
                         namespace,
                         object_id,
                         r.relation,
+                        path,
+                        budget,
                     )
                 )
             elif isinstance(r, TupleToUserset):
@@ -650,6 +743,8 @@ class Client:
                             pref.namespace,
                             pref.object_id,
                             r.computed_relation,
+                            path,
+                            budget,
                         )
                     )
 

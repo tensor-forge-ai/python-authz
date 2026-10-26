@@ -6,6 +6,7 @@ from authz.errors import (
     ConditionNotFound,
     CycleDetected,
     DepthLimitExceeded,
+    EvaluationBudgetExceeded,
     NamespaceNotFound,
     RelationNotFound,
     SchemaCycleDetected,
@@ -23,6 +24,7 @@ from authz.errors import (
         WouldCreateCycle,
         CycleDetected,
         DepthLimitExceeded,
+        EvaluationBudgetExceeded,
         CardinalityViolationError,
     ],
 )
@@ -94,3 +96,9 @@ def test_cardinality_violation_error_message():
     assert "max_subjects=1" in msg
     assert "existing=['user:alice']" in msg
     assert "attempted='user:bob'" in msg
+
+
+def test_evaluation_budget_exceeded_message():
+    err = EvaluationBudgetExceeded(10_000)
+    assert err.max_evaluations == 10_000
+    assert "10000" in str(err)

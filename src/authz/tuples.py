@@ -1,5 +1,31 @@
+import re
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Any, Mapping
+
+_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_\-]*$")
+
+
+def _check_name(kind: str, value: str, raw: str) -> None:
+    if not value:
+        raise ValueError(f"empty {kind} in {raw!r}")
+    if not _NAME.fullmatch(value):
+        raise ValueError(
+            f"invalid {kind} {value!r} in {raw!r}; expected letters, digits, '_' or '-', "
+            "starting with a letter or '_'"
+        )
+
+
+def _check_object_id(value: str, raw: str) -> None:
+    if not value:
+        raise ValueError(f"empty object id in {raw!r}")
+    if "#" in value:
+        raise ValueError(f"object id must not contain '#' in {raw!r}")
+
+
+def _check_chars(raw: str) -> None:
+    if any(c.isspace() or c < " " or c == "\x7f" for c in raw):
+        raise ValueError(f"whitespace or control characters are not allowed in {raw!r}")
 
 
 @dataclass(frozen=True)
@@ -17,6 +43,9 @@ class ObjectRef:
             raise ValueError(
                 f"invalid object reference {raw!r}; expected 'namespace:object_id'"
             )
+        _check_chars(raw)
+        _check_name("namespace", namespace, raw)
+        _check_object_id(object_id, raw)
         return cls(namespace, object_id)
 
 
@@ -43,6 +72,11 @@ class SubjectRef:
                 f"invalid subject reference {raw!r}; expected 'namespace:object_id' "
                 "or 'namespace:object_id#relation'"
             )
+        _check_chars(raw)
+        _check_name("namespace", namespace, raw)
+        _check_object_id(object_id, raw)
+        if sep:
+            _check_name("relation", relation, raw)
         return cls(namespace, object_id, relation if sep else None)
 
 
@@ -60,11 +94,19 @@ class RelationTuple:
     subject: str
     condition: Condition | None = None
 
+    def __post_init__(self) -> None:
+        raw = f"{self.namespace}:{self.object_id}#{self.relation}"
+        _check_chars(raw)
+        _check_name("namespace", self.namespace, raw)
+        _check_object_id(self.object_id, raw)
+        _check_name("relation", self.relation, raw)
+        SubjectRef.parse(self.subject)
+
     @property
     def object(self) -> ObjectRef:
         return ObjectRef(self.namespace, self.object_id)
 
-    @property
+    @cached_property
     def subject_ref(self) -> SubjectRef:
         return SubjectRef.parse(self.subject)
 

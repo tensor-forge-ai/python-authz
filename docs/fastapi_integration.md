@@ -55,10 +55,30 @@ async def read_document(
 ```
 
 The resource string `"document:{document_id}"` is filled in from the
-route's parameters automatically: `requires()` checks `request.path_params`,
-`request.query_params`, and `request.headers` to resolve formatted placeholders
-like `{document_id}`, `{claim_id}`, or `{x-tenant-id}`. If a route's resource
-can't be expressed as a template string, pass a sync or async function instead:
+route's path parameters. Placeholders are bare names; attribute access,
+indexing, and format specifications are rejected when the route is declared.
+A placeholder no path parameter supplies is answered with 400 instead of
+reaching the check.
+
+Query parameters and headers are attacker-controlled and are consulted only
+when you list them in `resource_sources`. A header placeholder is the
+lowercase header name with dashes replaced by underscores:
+
+```python
+Depends(requires(
+    "viewer", "report:{report_id}:{x_tenant_id}",
+    get_client=get_authz_client, get_subject=get_current_user,
+    resource_sources=("path", "header"),
+))
+```
+
+When a name has different values in two enabled sources, the request is
+rejected with 400, so the check cannot authorize one value while the handler
+reads another. A resolved resource that is not a valid `namespace:object_id`
+reference is also rejected with 400.
+
+If a route's resource can't be expressed as a template string, pass a sync
+or async function instead:
 
 ```python
 def resource_from_header(request):
@@ -77,10 +97,17 @@ Depends(requires("viewer", resource_from_header, get_client=..., get_subject=...
 Routes can supply runtime ABAC context (e.g. monetary amounts, jurisdictions, client IP)
 via `get_context`:
 
+Request context fills in what the stored tuple context leaves open; a key
+present in both takes the stored value, so a caller cannot raise a limit
+written on the tuple. The request side is still a claim about the operation:
+pass the values the handler will act on, and read anything security-relevant,
+such as the current time, from the server. A built-in condition whose
+parameters are missing returns `None`, and the check denies.
+
 ```python
 def get_request_context(request: Request) -> dict:
     return {
-        "amount": float(request.query_params.get("amount", 0)),
+        "amount": request.query_params.get("amount"),  # max_amount parses it
         "jurisdiction": request.headers.get("X-Jurisdiction", "US"),
     }
 

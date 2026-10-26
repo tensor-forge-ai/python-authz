@@ -1,3 +1,5 @@
+import pytest
+
 from authz.schema import (
     Direct,
     Exclusion,
@@ -50,7 +52,7 @@ def test_namespace_holds_name_and_relations():
     }
     ns = Namespace("document", relations)
     assert ns.name == "document"
-    assert ns.relations is relations
+    assert ns.relations == relations
     assert ns.singleton_relations == frozenset()
     assert ns.max_subjects == {}
     assert ns.max_subjects_for("owner") is None
@@ -108,3 +110,29 @@ def test_build_role_hierarchy_duplicate_roles_raises():
 
     with pytest.raises(ValueError, match="duplicate"):
         build_role_hierarchy(["admin", "manager", "admin"])
+
+
+def test_namespace_copies_relations_so_later_mutation_has_no_effect():
+    relations = {"owner": Direct()}
+    ns = Namespace("document", relations)
+    relations["viewer"] = From("editor")
+    relations["editor"] = From("viewer")
+    assert set(ns.relations) == {"owner"}
+
+
+def test_namespace_relations_are_read_only():
+    ns = Namespace("document", {"owner": Direct()})
+    with pytest.raises(TypeError):
+        ns.relations["viewer"] = Direct()  # type: ignore[index]
+    with pytest.raises(TypeError):
+        del ns.relations["owner"]  # type: ignore[attr-defined]
+    with pytest.raises(TypeError):
+        ns.max_subjects["owner"] = 5  # type: ignore[index]
+
+
+def test_mutating_the_source_mapping_after_register_cannot_bypass_cycle_check(client):
+    relations = {"viewer": Direct(), "editor": Direct()}
+    client.register_schema(Namespace("document", relations))
+    relations["viewer"] = From("editor")
+    relations["editor"] = From("viewer")
+    assert isinstance(client.schema["document"].relations["viewer"], Direct)

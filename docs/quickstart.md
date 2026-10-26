@@ -121,6 +121,10 @@ def is_business_hours(*, subject, resource, timezone):
 
 client.register_condition("business_hours", is_business_hours)
 
+# A condition returns True, False, or None. None means its context was
+# missing or invalid; such a tuple never grants access.
+
+
 await client.write([
     RelationTuple("document", "roadmap", "editor", "user:carol",
                   condition=Condition("business_hours", {"timezone": "UTC"})),

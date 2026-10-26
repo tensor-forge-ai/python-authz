@@ -50,6 +50,12 @@ class DepthLimitExceeded(AuthError):
         self.max_depth = max_depth
 
 
+class EvaluationBudgetExceeded(AuthError):
+    def __init__(self, max_evaluations: int):
+        super().__init__(f"evaluation exceeded max_evaluations={max_evaluations}")
+        self.max_evaluations = max_evaluations
+
+
 class CardinalityViolationError(AuthError):
     """Raised when writing a tuple would exceed a relation's max_subjects limit (e.g. singleton org_admin)."""
 

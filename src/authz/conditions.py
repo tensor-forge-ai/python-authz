@@ -1,9 +1,13 @@
 import inspect
+import math
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Union
 
 from authz.errors import ConditionNotFound
 
-ConditionFn = Callable[..., Union[bool, Awaitable[bool]]]
+ConditionResult = Union[bool, None]
+ConditionFn = Callable[..., Union[ConditionResult, Awaitable[ConditionResult]]]
+
+_RESERVED_KEYS = frozenset({"subject", "resource"})
 
 
 class ConditionEvaluator(Protocol):
@@ -11,7 +15,7 @@ class ConditionEvaluator(Protocol):
 
     async def evaluate(
         self, name: str, subject: str, resource: str, context: Mapping[str, Any]
-    ) -> bool: ...
+    ) -> bool | None: ...  # None: required context missing or invalid
 
 
 class PythonCallableEvaluator:
@@ -38,68 +42,110 @@ class PythonCallableEvaluator:
 
     async def evaluate(
         self, name: str, subject: str, resource: str, context: Mapping[str, Any]
-    ) -> bool:
+    ) -> bool | None:
         try:
             fn = self._conditions[name]
         except KeyError:
             raise ConditionNotFound(name) from None
+        for key in context:
+            if not isinstance(key, str):
+                raise ValueError(
+                    f"condition {name!r}: context keys must be strings, got {key!r}"
+                )
+            if key in _RESERVED_KEYS:
+                raise ValueError(
+                    f"condition {name!r}: context key {key!r} is reserved"
+                )
         result = fn(subject=subject, resource=resource, **context)
         if inspect.isawaitable(result):
             result = await result
-        return bool(result)
+        if result is None or isinstance(result, bool):
+            return result
+        raise TypeError(
+            f"condition {name!r} must return True, False or None, "
+            f"got {type(result).__name__}"
+        )
 
 
-def _max_amount(*, subject: str, resource: str, **ctx: Any) -> bool:
+def _number(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
     try:
-        amount = float(ctx.get("amount", 0))
-    except (ValueError, TypeError):
-        amount = 0.0
+        number = float(value)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _collection(value: Any) -> Any:
+    return value if isinstance(value, (list, tuple, set, frozenset)) else None
+
+
+def _attribute(ctx: Mapping[str, Any]) -> Any:
+    name = ctx.get("attribute")
+    if not isinstance(name, str) or not name:
+        return None
+    return ctx.get(name)
+
+
+def _member(value: Any, allowed: Any) -> bool | None:
     try:
-        max_amount = float(ctx.get("max_amount", float("inf")))
-    except (ValueError, TypeError):
-        max_amount = float("inf")
-    return amount <= max_amount
+        return value in allowed
+    except TypeError:
+        return None
 
 
-def _min_amount(*, subject: str, resource: str, **ctx: Any) -> bool:
-    try:
-        amount = float(ctx.get("amount", 0))
-    except (ValueError, TypeError):
-        amount = 0.0
-    try:
-        min_amount = float(ctx.get("min_amount", 0))
-    except (ValueError, TypeError):
-        min_amount = 0.0
-    return amount >= min_amount
+def _max_amount(*, subject: str, resource: str, **ctx: Any) -> bool | None:
+    amount, limit = _number(ctx.get("amount")), _number(ctx.get("max_amount"))
+    if amount is None or limit is None:
+        return None
+    return amount <= limit
 
 
-def _equals_attr(*, subject: str, resource: str, **ctx: Any) -> bool:
-    attr_name = str(ctx.get("attribute", ""))
-    return ctx.get(attr_name) == ctx.get("expected")
+def _min_amount(*, subject: str, resource: str, **ctx: Any) -> bool | None:
+    amount, limit = _number(ctx.get("amount")), _number(ctx.get("min_amount"))
+    if amount is None or limit is None:
+        return None
+    return amount >= limit
 
 
-def _in_set(*, subject: str, resource: str, **ctx: Any) -> bool:
-    attr_name = str(ctx.get("attribute", ""))
-    allowed = ctx.get("allowed_values")
-    if allowed is None:
-        allowed = ()
-    return ctx.get(attr_name) in allowed
+def _equals_attr(*, subject: str, resource: str, **ctx: Any) -> bool | None:
+    actual, expected = _attribute(ctx), ctx.get("expected")
+    if actual is None or expected is None:
+        return None
+    return actual == expected
 
 
-def _jurisdiction_match(*, subject: str, resource: str, **ctx: Any) -> bool:
-    jur = ctx.get("jurisdiction")
-    if "allowed_jurisdictions" in ctx:
-        allowed = ctx.get("allowed_jurisdictions")
-        if allowed is None:
-            allowed = ()
-        return jur in allowed
-    if "required_jurisdiction" in ctx:
-        return jur == ctx.get("required_jurisdiction")
-    return True
+def _in_set(*, subject: str, resource: str, **ctx: Any) -> bool | None:
+    actual, allowed = _attribute(ctx), _collection(ctx.get("allowed_values"))
+    if actual is None or allowed is None:
+        return None
+    return _member(actual, allowed)
 
 
-def _not_same_subject(*, subject: str, resource: str, **ctx: Any) -> bool:
-    return subject != ctx.get("excluded_subject")
+def _jurisdiction_match(*, subject: str, resource: str, **ctx: Any) -> bool | None:
+    jurisdiction = ctx.get("jurisdiction")
+    if jurisdiction is None:
+        return None
+    allowed, required = ctx.get("allowed_jurisdictions"), ctx.get("required_jurisdiction")
+    if allowed is None and required is None:
+        return None
+    results = []
+    if allowed is not None:
+        allowed = _collection(allowed)
+        results.append(None if allowed is None else _member(jurisdiction, allowed))
+    if required is not None:
+        results.append(jurisdiction == required)
+    if False in results:
+        return False
+    return None if None in results else True
+
+
+def _not_same_subject(*, subject: str, resource: str, **ctx: Any) -> bool | None:
+    excluded = ctx.get("excluded_subject")
+    if not isinstance(excluded, str) or not excluded:
+        return None
+    return subject != excluded
 
 
 def builtin_conditions() -> dict[str, ConditionFn]:

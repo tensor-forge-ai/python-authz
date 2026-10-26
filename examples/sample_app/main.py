@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from authz import Client, PythonCallableEvaluator, SqliteStorage
 
@@ -30,3 +31,8 @@ app = FastAPI(title="fastapi-auth sample: task tracker", lifespan=lifespan)
 app.include_router(projects.router)
 app.include_router(tasks.router)
 app.include_router(authz_admin.router)
+
+
+@app.exception_handler(ValueError)
+async def invalid_reference(request: Request, exc: ValueError) -> JSONResponse:
+    return JSONResponse(status_code=422, content={"detail": str(exc)})

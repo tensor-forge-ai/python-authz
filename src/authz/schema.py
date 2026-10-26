@@ -1,4 +1,5 @@
 from collections.abc import Iterable, Mapping, Sequence
+from types import MappingProxyType
 from typing import Iterator
 
 from authz.errors import SchemaCycleDetected
@@ -64,11 +65,11 @@ class Namespace:
         max_subjects: Mapping[str, int] | None = None,
     ) -> None:
         self.name = name
-        self.relations = relations  # type: ignore[assignment]
+        self.relations: Mapping[str, RewriteRule] = MappingProxyType(dict(relations))
         self.singleton_relations: frozenset[str] = (
             frozenset(singleton_relations) if singleton_relations is not None else frozenset()
         )
-        self.max_subjects: Mapping[str, int] = (
+        self.max_subjects: Mapping[str, int] = MappingProxyType(
             dict(max_subjects) if max_subjects is not None else {}
         )
 
@@ -145,14 +146,16 @@ def check_schema_cycles(namespace: Namespace) -> None:
             dfs(relation, [])
 
 
-def tupleset_relations(rule: RewriteRule) -> set[str]:
+def tuple_to_usersets(rule: RewriteRule) -> Iterator[TupleToUserset]:
     if isinstance(rule, TupleToUserset):
-        return {rule.tupleset_relation}
-    if isinstance(rule, (Union, Intersection)):
-        result: set[str] = set()
+        yield rule
+    elif isinstance(rule, (Union, Intersection)):
         for child in rule.children:
-            result |= tupleset_relations(child)
-        return result
-    if isinstance(rule, Exclusion):
-        return tupleset_relations(rule.base) | tupleset_relations(rule.subtract)
-    return set()
+            yield from tuple_to_usersets(child)
+    elif isinstance(rule, Exclusion):
+        yield from tuple_to_usersets(rule.base)
+        yield from tuple_to_usersets(rule.subtract)
+
+
+def tupleset_relations(rule: RewriteRule) -> set[str]:
+    return {r.tupleset_relation for r in tuple_to_usersets(rule)}

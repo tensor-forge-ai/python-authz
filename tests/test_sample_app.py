@@ -222,3 +222,31 @@ def test_contractor_access_follows_active_contract_flag(app_client):
         json={"subject": "user:carol", "permission": "editor", "resource": "project:p1"},
     )
     assert denied.json() == {"allowed": False}
+
+
+def test_admin_write_with_invalid_identifier_is_422(app_client):
+    response = app_client.post(
+        "/authz/write",
+        headers={"X-User-Id": "alice"},
+        json={
+            "tuples": [
+                {
+                    "namespace": "project",
+                    "object_id": "p 1",
+                    "relation": "editor",
+                    "subject": "user:bob",
+                }
+            ]
+        },
+    )
+    assert response.status_code == 422
+    assert "whitespace" in response.json()["detail"]
+
+
+def test_admin_check_with_invalid_resource_is_422(app_client):
+    response = app_client.post(
+        "/authz/check",
+        headers={"X-User-Id": "alice"},
+        json={"subject": "user:bob", "permission": "editor", "resource": "project:"},
+    )
+    assert response.status_code == 422

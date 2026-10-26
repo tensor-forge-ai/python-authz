@@ -1,13 +1,13 @@
 [project]
 name = "python-authz"
-version = "0.7.0"
+version = "0.8.0"
 description = "A framework-agnostic ReBAC/RBAC/ABAC authorization engine built on one Zanzibar-style relationship graph"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Anupam Gupta", email = "anupam@trois.in" }]
 requires-python = ">=3.11"
-dependencies = ["duckdb>=1.5.5", "aiosqlite>=0.21.0", "asyncpg>=0.31.0"]
+dependencies = ["aiosqlite>=0.21.0"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -17,27 +17,29 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Security",
     "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
 ]
 
 [project.urls]
-Homepage = "https://github.com/mapuna/python-authz"
-Repository = "https://github.com/mapuna/python-authz"
-Issues = "https://github.com/mapuna/python-authz/issues"
+Homepage = "https://github.com/tensor-forge-ai/python-authz"
+Repository = "https://github.com/tensor-forge-ai/python-authz"
+Issues = "https://github.com/tensor-forge-ai/python-authz/issues"
 
 [project.optional-dependencies]
-fastapi = ["fastapi[all]>=0.141.1"]
+fastapi = ["fastapi>=0.141.1"]
+postgres = ["asyncpg>=0.31.0"]
 
 [dependency-groups]
 dev = [
+    "asyncpg>=0.31.0",
+    "fastapi>=0.141.1",
     "httpx2>=2.12.0",
     "pyjwt>=2.13.0",
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
+    "python-multipart>=0.0.20",
     "testcontainers[postgres]>=4.15.0",
 ]
-
-[project.scripts]
-authz = "authz:main"
 
 [tool.uv.build-backend]
 module-name = "authz"
